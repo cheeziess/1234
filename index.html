@@ -142,34 +142,129 @@
     function normalizeReply(body) {
       if (body === null || body === undefined) return null;
 
-      // Pick likely candidate from object
-      let candidate = typeof body === "object"
-        ? (body.reply ?? body.message ?? body.response ?? body.output ?? body.text ?? body.me ?? body)
-        : body;
+      function extractJsonSubstring(s) {
+        const firstObj = s.indexOf('{'), lastObj = s.lastIndexOf('}');
+        if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) return s.slice(firstObj, lastObj + 1);
+        const firstArr = s.indexOf('['), lastArr = s.lastIndexOf(']');
+        if (firstArr !== -1 && lastArr !== -1 && lastArr > firstArr) return s.slice(firstArr, lastArr + 1);
+        return null;
+      }
 
-      // Try to repeatedly JSON.parse strings up to a few times
-      for (let i = 0; i < 3; i++) {
-        if (typeof candidate !== "string") break;
-        const s = candidate.trim();
-        // If looks like JSON, try parse
-        if (s.startsWith("{") || s.startsWith("[") || s.startsWith('"')) {
-          try {
-            candidate = JSON.parse(s);
-            continue; // attempt another round in case of double-encoded
-          } catch (e) {
+      function cleanString(s) {
+        if (typeof s !== 'string') return s;
+        // remove leading equals or stray braces, unescape common sequences
+        s = s.replace(/^[=\s\r\n]+/, '').trim();
+        s = s.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\'/g, "'");
+        // collapse repeated whitespace
+        s = s.replace(/\s{2,}/g, ' ').trim();
+        return s;
+      }
+
+      function attempt(val, depth = 0) {
+        if (depth > 6) return null;
+        if (val === null || val === undefined) return null;
+
+        if (typeof val === 'string') {
+          let s = cleanString(val);
+          // Try direct JSON parse multiple times
+          for (let i = 0; i < 3; i++) {
+            try {
+              const p = JSON.parse(s);
+              return attempt(p, depth + 1);
+            } catch {}
+            // try extracting a JSON-looking substring and parse
+            const sub = extractJsonSubstring(s);
+            if (sub && sub !== s) {
+              try {
+                const p2 = JSON.parse(sub);
+                return attempt(p2, depth + 1);
+              } catch {}
+            }
             break;
           }
+          // Try regex to capture "reply": "..."
+          const m = s.match(/"reply"\s*:\s*"([\s\S]*?)"/);
+          if (m && m[1]) return cleanString(m[1]);
+          // If looks like object encoded as key (e.g. '{"reply": "...":{'), try to extract between first "reply" and next ":"
+          const m2 = s.match(/"reply"\s*:\s*([^,}\]]+)/);
+          if (m2 && m2[1]) return cleanString(m2[1].replace(/^["']|["']$/g, ''));
+          // fallback: return cleaned raw string
+          return s;
         }
-        break;
+
+        if (typeof val === 'object') {
+          // common keys
+          const keys = ['reply', 'message', 'response', 'output', 'text', 'me'];
+          for (const k of keys) {
+            if (k in val) {
+              const r = attempt(val[k], depth + 1);
+              if (r) return r;
+            }
+          }
+          // sometimes the key itself contains JSON; try parsing keys
+          for (const key of Object.keys(val)) {
+            if (typeof key === 'string' && (key.includes('"reply"') || key.includes('reply'))) {
+              const parsed = attempt(key, depth + 1);
+              if (parsed) return parsed;
+            }
+            const r = attempt(val[key], depth + 1);
+            if (r) return r;
+          }
+          // last resort: stringify then try to extract reply
+          try {
+            const s = JSON.stringify(val);
+            return attempt(s, depth + 1);
+          } catch {}
+        }
+        return String(val);
       }
 
-      // If candidate is object now, find a textual field
-      if (typeof candidate === "object" && candidate !== null) {
-        return (candidate.output ?? candidate.text ?? candidate.reply ?? candidate.message ?? candidate.response ?? JSON.stringify(candidate));
+      return attempt(body) ?? null;
+    }
+
+    // new: extract only the value under the "output" key (searches nested/stringified JSON)
+    function extractOutputOnly(body) {
+      if (body === null || body === undefined) return null;
+
+      function tryExtract(val, depth = 0) {
+        if (depth > 6 || val === null || val === undefined) return null;
+
+        // If string, try to parse JSON then continue searching
+        if (typeof val === 'string') {
+          const s = val.trim();
+          try {
+            const p = JSON.parse(s);
+            return tryExtract(p, depth + 1);
+          } catch {}
+          // try to extract a JSON-looking substring
+          const firstObj = s.indexOf('{'), lastObj = s.lastIndexOf('}');
+          if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
+            try {
+              const sub = s.slice(firstObj, lastObj + 1);
+              const p2 = JSON.parse(sub);
+              return tryExtract(p2, depth + 1);
+            } catch {}
+          }
+          return null;
+        }
+
+        if (typeof val === 'object') {
+          // direct match
+          if (Object.prototype.hasOwnProperty.call(val, 'output')) return val['output'];
+          // recurse into properties
+          for (const k of Object.keys(val)) {
+            const r = tryExtract(val[k], depth + 1);
+            if (r !== null && r !== undefined) return r;
+          }
+        }
+
+        return null;
       }
 
-      // Otherwise, ensure string
-      return typeof candidate === "string" ? candidate : String(candidate);
+      const found = tryExtract(body);
+      if (found === null || found === undefined) return null;
+      // If the found value is complex, normalize it to a string for display
+      return normalizeReply(found) ?? String(found);
     }
 
     async function sendMessage() {
@@ -218,7 +313,9 @@
 
         console.log("Webhook response:", body);
 
-        const reply = normalizeReply(body) || "(tidak ada balasan)";
+        // prefer only the JSON value under "output"
+        const reply = extractOutputOnly(body) || "(tidak ada balasan)";
+
         addMessage(reply, "bot");
       } catch (err) {
         console.error("Fetch error:", err);
