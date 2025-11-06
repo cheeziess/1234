@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chatbot Dapur Inoy</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f2f2f2;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    #chat-container {
+      width: 100%;
+      max-width: 430px;
+      height: 90vh;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #header {
+      background: #8b2e2e;
+      color: white;
+      padding: 15px;
+      font-size: 20px;
+      font-weight: bold;
+      text-align: center;
+    }
+
+    #messages {
+      flex: 1;
+      padding: 15px;
+      overflow-y: auto;
+      background: #fafafa;
+    }
+
+    .msg {
+      margin: 10px 0;
+      max-width: 80%;
+      padding: 10px 15px;
+      border-radius: 12px;
+      line-height: 1.4;
+      font-size: 15px;
+    }
+
+    .me {
+      background: #d1e7ff;
+      color: #003366;
+      margin-left: auto;
+      border-bottom-right-radius: 0;
+    }
+
+    .bot {
+      background: #eee;
+      color: #333;
+      margin-right: auto;
+      border-bottom-left-radius: 0;
+    }
+
+    #input-area {
+      display: flex;
+      border-top: 1px solid #ddd;
+    }
+
+    #userInput {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      outline: none;
+      font-size: 16px;
+    }
+
+    #sendBtn {
+      background: #8b2e2e;
+      color: white;
+      border: none;
+      padding: 0 20px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    #sendBtn:hover {
+      background: #7a2626;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="chat-container">
+    <div id="header">Chat Dapur Inoy</div>
+
+    <div id="messages"></div>
+
+    <div id="input-area">
+      <input id="userInput" type="text" placeholder="Tulis pesan..." />
+      <button id="sendBtn" onclick="sendMessage()">Kirim</button>
+    </div>
+  </div>
+
+  <script>
+    const webhookURL = "https://wertetete.app.n8n.cloud/webhook/chatbot";
+
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("userInput");
+
+    function addMessage(text, who) {
+      const div = document.createElement("div");
+      div.className = `msg ${who}`;
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addTyping() {
+      const div = document.createElement("div");
+      div.className = "msg bot";
+      div.id = "typingIndicator";
+      div.textContent = "•••";
+      div.style.opacity = "0.5";
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function removeTyping() {
+      const typing = document.getElementById("typingIndicator");
+      if (typing) typing.remove();
+    }
+
+    // Normalize possible double-encoded / nested JSON responses into a usable string
+    function normalizeReply(body) {
+      if (body === null || body === undefined) return null;
+
+      // Pick likely candidate from object
+      let candidate = typeof body === "object"
+        ? (body.reply ?? body.message ?? body.response ?? body.output ?? body.text ?? body.me ?? body)
+        : body;
+
+      // Try to repeatedly JSON.parse strings up to a few times
+      for (let i = 0; i < 3; i++) {
+        if (typeof candidate !== "string") break;
+        const s = candidate.trim();
+        // If looks like JSON, try parse
+        if (s.startsWith("{") || s.startsWith("[") || s.startsWith('"')) {
+          try {
+            candidate = JSON.parse(s);
+            continue; // attempt another round in case of double-encoded
+          } catch (e) {
+            break;
+          }
+        }
+        break;
+      }
+
+      // If candidate is object now, find a textual field
+      if (typeof candidate === "object" && candidate !== null) {
+        return (candidate.output ?? candidate.text ?? candidate.reply ?? candidate.message ?? candidate.response ?? JSON.stringify(candidate));
+      }
+
+      // Otherwise, ensure string
+      return typeof candidate === "string" ? candidate : String(candidate);
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      addMessage(text, "me");
+      inputEl.value = "";
+
+      addTyping();
+
+      try {
+        const res = await fetch(webhookURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+
+        // Try to parse body as JSON, fallback to text
+        let body;
+        const ct = res.headers.get("content-type") || "";
+        try {
+          if (ct.includes("application/json")) {
+            body = await res.json();
+          } else {
+            const txt = await res.text();
+            try {
+              body = JSON.parse(txt);
+            } catch {
+              body = txt;
+            }
+          }
+        } catch (parseErr) {
+          // Last fallback: text()
+          body = await res.text().catch(() => null);
+        }
+
+        removeTyping();
+
+        // If HTTP status not ok, show status + body for debug
+        if (!res.ok) {
+          console.error("HTTP error", res.status, body);
+          addMessage(`Server mengembalikan error ${res.status}.`, "bot");
+          return;
+        }
+
+        console.log("Webhook response:", body);
+
+        const reply = normalizeReply(body) || "(tidak ada balasan)";
+        addMessage(reply, "bot");
+      } catch (err) {
+        console.error("Fetch error:", err);
+        removeTyping();
+        addMessage("Maaf, terjadi kesalahan koneksi.", "bot");
+      }
+    }
+
+    // Enter untuk kirim
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendMessage();
+    });
+
+    // Greeting awal
+    addMessage("Halo! Ada yang bisa saya bantu tentang risol Dapur Inoy? 😊", "bot");
+  </script>
+
+</body>
+</html>
